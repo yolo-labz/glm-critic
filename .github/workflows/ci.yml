@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e .
+      # Sem PYTHONPATH e sem sys.path no teste: o pacote é instalado como
+      # qualquer consumidor instalaria, então o CI testa o que se distribui.
+      - run: python -m unittest discover -s tests -v
+      - name: lint
+        run: |
+          pip install ruff
+          ruff check .
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # A imagem é o artefato de deploy; se ela não constrói, o deploy quebra no
+      # Dokku — melhor descobrir aqui.
+      - run: docker build -t glm-critic:ci .
+      - name: o container recusa subir sem token
+        run: |
+          if docker run --rm -e SOURCE_URL=http://x glm-critic:ci; then
+            echo "subiu sem SERVICE_TOKEN — isso não deveria acontecer"; exit 1
+          fi
+          echo "recusou corretamente"

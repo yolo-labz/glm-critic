@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glm-critic"
+version = "0.1.0"
+description = "LLM rubric critic for content streams — scores items against an explicit value rubric and routes the signal"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Pedro H S Balbino"}]
+keywords = ["rss", "triage", "llm-as-judge", "miniflux", "n8n"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Text Processing :: Filters",
+]
+# Sem dependências de runtime, de propósito: stdlib só. O container fica pequeno
+# e a superfície de ataque também — num serviço que roda com uma chave de API no
+# ambiente, cada dependência é mais uma coisa que pode vazar.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["ruff>=0.6"]
+
+[project.scripts]
+glm-critic = "glm_critic.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yolo-labz/glm-critic"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+# N802 exige snake_case em nomes de função; a stdlib nomeia os handlers HTTP em
+# CamelCase (do_GET/do_POST) e é a interface que o BaseHTTPRequestHandler chama.
+# A exceção vive aqui, na configuração, em vez de virar supressão inline no
+# código — assim ela vale para o arquivo inteiro e é revisável num só lugar.
+"src/glm_critic/service.py" = ["N802"]
