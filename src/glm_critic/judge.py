@@ -25,6 +25,14 @@ import urllib.request
 
 from .rubric import VERDICT_SCHEMA, Rubric
 
+# Repetição com instrução mais dura: o juiz ocasionalmente responde em prosa
+# em vez do array pedido. Medido uma vez em cada ~cinco lotes; recuperar é mais
+# barato que descartar o lote já pago.
+STRICT_SUFFIX = (
+    "\n\nIMPORTANTE: responda SOMENTE com o array JSON, começando por [ e "
+    "terminando em ]. Sem explicação, sem cerca de código, sem texto antes ou depois."
+)
+
 
 class JudgeError(RuntimeError):
     """O juiz não devolveu algo utilizável."""

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .dedup import collapse
-from .judge import JudgeError, build_prompt, call_judge, verdicts_from_response
+from .judge import STRICT_SUFFIX, JudgeError, build_prompt, call_judge, verdicts_from_response
 from .rubric import Rubric
 from .store import Verdict, VerdictLog, item_key, now_iso, rubric_hash
 
@@ -23,6 +23,7 @@ class CritiqueResult:
     collapsed: int = 0
     judged: int = 0
     from_cache: int = 0
+    retried: int = 0
     signals: list[Verdict] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     prompt_tokens: int = 0
@@ -39,6 +40,7 @@ class CritiqueResult:
             "collapsed": self.collapsed,
             "judged": self.judged,
             "from_cache": self.from_cache,
+            "retried": self.retried,
             "signals": len(self.signals),
             "failures": list(self.failures),
             "tokens": {"prompt": self.prompt_tokens, "completion": self.completion_tokens},
@@ -98,14 +100,26 @@ def critique(
 
     for i in range(0, len(pending), max(1, settings.batch_size)):
         chunk = pending[i : i + settings.batch_size]
+        prompt = build_prompt(chunk, rubric)
         try:
-            text, usage = judge_call(build_prompt(chunk, rubric), settings)
+            text, usage = judge_call(prompt, settings)
             parsed = verdicts_from_response(text, len(chunk))
-        except JudgeError as exc:
-            # Um lote perdido é ruído visível; um veredito no item errado é erro
-            # silencioso. O código prefere o primeiro, e registra qual lote caiu.
-            res.failures.append(f"lote {i // settings.batch_size + 1}: {exc}")
-            continue
+        except JudgeError as first_exc:
+            # Medido: de vez em quando o juiz responde em prosa em vez do array.
+            # Uma segunda tentativa com instrução mais dura recupera a maioria
+            # desses lotes por um custo pequeno; sem ela, o lote inteiro é pago
+            # e descartado.
+            try:
+                text, usage = judge_call(prompt + STRICT_SUFFIX, settings)
+                parsed = verdicts_from_response(text, len(chunk))
+                res.retried += 1
+            except JudgeError as exc:
+                # Um lote perdido é ruído visível; um veredito no item errado é
+                # erro silencioso. O código prefere o primeiro, e registra qual.
+                res.failures.append(
+                    f"lote {i // settings.batch_size + 1}: {exc} (primeira tentativa: {first_exc})"
+                )
+                continue
 
         res.prompt_tokens += int(usage.get("prompt_tokens") or 0)
         res.completion_tokens += int(usage.get("completion_tokens") or 0)

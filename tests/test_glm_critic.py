@@ -345,3 +345,75 @@ class TestService(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestRetry(unittest.TestCase):
+    """O juiz às vezes responde em prosa; uma segunda tentativa recupera o lote.
+
+    Sem isto o lote inteiro é pago e descartado — medido uma vez em cada ~cinco
+    lotes, o que não é raro o bastante para ignorar.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.settings = Settings(judge_model="m", batch_size=1, min_score=6)
+        self.rubric = Rubric(text="r {min_score}", min_score=6)
+
+    def test_prose_then_json_succeeds_and_is_counted(self):
+        attempts = []
+
+        def flaky(prompt, settings):
+            attempts.append(prompt)
+            if len(attempts) == 1:
+                return "desculpe, não consigo responder em JSON", {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                }
+            return '[{"i":0,"v":"signal","s":9,"art":"repo","why":"ok"}]', {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+            }
+
+        res = critique(
+            [item(1, "bom")],
+            self.settings,
+            self.rubric,
+            VerdictLog(self.tmp / "r.jsonl"),
+            judge_call=flaky,
+        )
+        self.assertEqual(len(attempts), 2, "deveria tentar duas vezes")
+        self.assertEqual(res.retried, 1)
+        self.assertEqual(len(res.signals), 1)
+        self.assertEqual(res.failures, [])
+
+    def test_second_attempt_uses_the_strict_suffix(self):
+        seen = []
+
+        def flaky(prompt, settings):
+            seen.append(prompt)
+            return "prosa", {}
+
+        critique(
+            [item(1, "x")],
+            self.settings,
+            self.rubric,
+            VerdictLog(self.tmp / "r2.jsonl"),
+            judge_call=flaky,
+        )
+        self.assertIn("SOMENTE com o array JSON", seen[1])
+        self.assertNotIn("SOMENTE com o array JSON", seen[0])
+
+    def test_both_attempts_failing_is_reported(self):
+        def always_prose(prompt, settings):
+            return "nada de JSON aqui", {}
+
+        res = critique(
+            [item(1, "x")],
+            self.settings,
+            self.rubric,
+            VerdictLog(self.tmp / "r3.jsonl"),
+            judge_call=always_prose,
+        )
+        self.assertEqual(res.judged, 0)
+        self.assertEqual(len(res.failures), 1)
+        self.assertIn("primeira tentativa", res.failures[0])
