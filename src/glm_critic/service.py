@@ -22,10 +22,13 @@ import hmac
 import json
 import logging
 import threading
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .config import Settings
 from .critique import critique
+from .judge import JudgeError
 from .rubric import Rubric, rubric_for
 from .sources import HttpSource, MinifluxSource, SourceError
 from .store import VerdictLog
@@ -87,35 +90,95 @@ class Handler(BaseHTTPRequestHandler):
         s = self.settings
         if opts.get("limit"):
             s = Settings(**{**s.__dict__, "extra": {**s.extra, "limit": int(opts["limit"])}})
-
-        http = HttpSource(s.source_url, s.source_key, s.user_agent, s.source_timeout)
-        source = MinifluxSource(http)
         try:
-            items, total = source.entries(
+            payload = run_once(
+                s,
+                self.rubric,
+                star=bool(opts.get("star")) and not opts.get("dry_run"),
                 status=str(opts.get("status") or "unread"),
                 limit=int(opts.get("limit") or 120),
             )
         except SourceError as exc:
             self._json(502, {"ok": False, "error": str(exc)})
             return
+        self._json(200, payload)
+        return
 
-        res = critique(
-            items, s, self.rubric, VerdictLog(s.log_path), dry_run=bool(opts.get("dry_run"))
-        )
-        payload = res.as_dict()
-        payload["considered_total_at_source"] = total
-        payload["ok"] = True
-
-        if opts.get("star") and not opts.get("dry_run"):
-            payload["starred"] = sum(
-                1 for v in res.signals if v.item_id is not None and source.star(int(v.item_id))
-            )
         self._json(200, payload)
 
     def log_message(self, fmt: str, *args) -> None:
         # O log padrão vai para stderr com o caminho da requisição, que é o que
         # o `dokku logs` mostra. Silenciar seria perder a única trilha do serviço.
         logging.info("%s %s", self.address_string(), fmt % args)
+
+
+def run_once(
+    settings: Settings,
+    rubric: Rubric,
+    *,
+    star: bool = True,
+    status: str = "unread",
+    limit: int = 80,
+) -> dict:
+    """Um ciclo completo: buscar, julgar, marcar. Devolve o payload do resultado.
+
+    Existe separado do handler HTTP porque o modo autônomo (agendar por dentro)
+    e o modo sob demanda precisam do mesmo caminho — duas implementações
+    divergiriam na primeira correção.
+    """
+    http = HttpSource(
+        settings.source_url, settings.source_key, settings.user_agent, settings.source_timeout
+    )
+    source = MinifluxSource(http)
+    items, total = source.entries(status=status, limit=limit)
+    res = critique(items, settings, rubric, VerdictLog(settings.log_path))
+    payload = res.as_dict()
+    payload["considered_total_at_source"] = total
+    payload["ok"] = True
+    if star:
+        payload["starred"] = sum(
+            1 for v in res.signals if v.item_id is not None and source.star(int(v.item_id))
+        )
+    return payload
+
+
+def notify(url: str, payload: dict, timeout: int = 30) -> bool:
+    """Empurra o resultado para quem orquestra a entrega.
+
+    A direção importa: o critic **chama** o n8n em vez de ser chamado. O node
+    HTTP do n8n recusa hostname interno com `Invalid URL`, e expor o serviço de
+    IA para contornar isso troca um problema de configuração por superfície de
+    ataque. Chamando daqui, a URL interna é só uma URL.
+    """
+    if not url:
+        return False
+    req = urllib.request.Request(
+        url,
+        method="POST",
+        data=json.dumps(payload, ensure_ascii=False).encode(),
+        headers={"Content-Type": "application/json", "User-Agent": "glm-critic"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return 200 <= r.status < 300
+    except (urllib.error.URLError, urllib.error.HTTPError) as exc:
+        logging.error("notify falhou: %s", exc)
+        return False
+
+
+def _scheduler(settings: Settings, rubric: Rubric, stop: threading.Event) -> None:
+    """Roda o ciclo a cada CRITIC_EVERY_SECONDS e empurra para NOTIFY_URL."""
+    while not stop.wait(settings.every_seconds):
+        try:
+            payload = run_once(settings, rubric)
+            logging.info(
+                "ciclo: julgados=%s sinais=%s", payload.get("judged"), payload.get("signals")
+            )
+            if payload.get("signals"):
+                notify(settings.notify_url, payload)
+        except (SourceError, JudgeError, OSError, ValueError) as exc:
+            # Um ciclo ruim não pode matar o serviço: registra e tenta no próximo.
+            logging.error("ciclo falhou: %s", exc)
 
 
 def make_server(settings: Settings, host: str, port: int, rubric: Rubric | None = None):
@@ -125,12 +188,23 @@ def make_server(settings: Settings, host: str, port: int, rubric: Rubric | None 
     return ThreadingHTTPServer((host, port), handler)
 
 
-def serve(settings: Settings, host: str = "0.0.0.0", port: int = 8080) -> None:
-    httpd = make_server(settings, host, port)
+def serve(settings: Settings, host: str = "0.0.0.0", port: int = 8080,
+          rubric: Rubric | None = None) -> None:
+    rubric = rubric or rubric_for(settings)
+    httpd = make_server(settings, host, port, rubric)
     logging.info("glm-critic ouvindo em %s:%s · modelo %s", host, port, settings.judge_model)
+    stop = threading.Event()
+    if settings.every_seconds > 0:
+        logging.info(
+            "modo autônomo: ciclo a cada %ss → %s",
+            settings.every_seconds,
+            settings.notify_url or "(sem NOTIFY_URL)",
+        )
+        threading.Thread(target=_scheduler, args=(settings, rubric, stop), daemon=True).start()
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     try:
         thread.join()
     except KeyboardInterrupt:
+        stop.set()
         httpd.shutdown()

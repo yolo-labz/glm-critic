@@ -417,3 +417,58 @@ class TestRetry(unittest.TestCase):
         self.assertEqual(res.judged, 0)
         self.assertEqual(len(res.failures), 1)
         self.assertIn("primeira tentativa", res.failures[0])
+
+
+class TestNotifyDirection(unittest.TestCase):
+    """A inversão: o critic CHAMA o n8n, em vez de ser chamado.
+
+    O node HTTP do n8n recusa hostname interno (`Invalid URL`), e expor o serviço
+    de IA para contornar isso troca um problema de configuração por superfície de
+    ataque. Chamando daqui, a URL interna é só uma URL.
+    """
+
+    def test_notify_without_url_is_a_noop(self):
+        from glm_critic.service import notify
+
+        self.assertFalse(notify("", {"signals": 1}))
+
+    def test_notify_posts_the_payload(self):
+        from glm_critic.service import notify
+
+        seen = {}
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_open(req, timeout=None):
+            seen["url"] = req.full_url
+            seen["method"] = req.get_method()
+            seen["body"] = json.loads(req.data.decode())
+            return FakeResponse()
+
+        import unittest.mock as mock
+
+        with mock.patch("urllib.request.urlopen", fake_open):
+            ok = notify("http://n8n.web.1:5678/webhook/critic", {"signals": 2, "items": []})
+        self.assertTrue(ok)
+        self.assertEqual(seen["method"], "POST")
+        self.assertEqual(seen["body"]["signals"], 2)
+
+    def test_notify_failure_is_reported_not_raised(self):
+        from glm_critic.service import notify
+
+        import urllib.error
+        import unittest.mock as mock
+
+        with mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError("boom")):
+            self.assertFalse(notify("http://x.invalid/", {"signals": 1}))
+
+    def test_every_seconds_defaults_to_off(self):
+        s = Settings.from_env({})
+        self.assertEqual(s.every_seconds, 0, "o modo autônomo não pode ligar sozinho")

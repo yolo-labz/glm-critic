@@ -39,6 +39,8 @@ class Settings:
     source_key: str = ""
     source_timeout: int = 45
     service_token: str = ""
+    notify_url: str = ""
+    every_seconds: int = 0
     log_path: str = "verdicts.jsonl"
     extra: dict = field(default_factory=dict)
 
@@ -68,6 +70,8 @@ class Settings:
             source_key=e.get("SOURCE_API_KEY", ""),
             source_timeout=_int("SOURCE_TIMEOUT", 45),
             service_token=e.get("SERVICE_TOKEN", ""),
+            notify_url=e.get("NOTIFY_URL", ""),
+            every_seconds=_int("CRITIC_EVERY_SECONDS", 0),
             log_path=e.get("CRITIC_LOG", "verdicts.jsonl"),
         )
         return s
