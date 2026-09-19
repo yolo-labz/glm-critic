@@ -155,17 +155,24 @@ def call_judge(prompt: str, settings, opener=urllib.request.urlopen) -> tuple[st
         payload.update(input=prompt, max_output_tokens=settings.max_tokens)
         headers["Authorization"] = f"Bearer {settings.judge_key}"
     elif settings.judge_api in {"chat", "anthropic"}:
-        payload.update(messages=[{"role": "user", "content": prompt}],
-                       max_tokens=settings.max_tokens)
+        payload.update(
+            messages=[{"role": "user", "content": prompt}], max_tokens=settings.max_tokens
+        )
         if settings.judge_api == "anthropic":
             headers.update({"x-api-key": settings.judge_key, "anthropic-version": "2023-06-01"})
         else:
             headers["Authorization"] = f"Bearer {settings.judge_key}"
     else:
         raise JudgeError("protocolo de juiz desconhecido")
+    credential_headers = {k: headers.pop(k) for k in ("Authorization", "x-api-key") if k in headers}
     req = urllib.request.Request(
-        settings.judge_url, method="POST", data=json.dumps(payload).encode(), headers=headers,
+        settings.judge_url,
+        method="POST",
+        data=json.dumps(payload).encode(),
+        headers=headers,
     )
+    for name, value in credential_headers.items():
+        req.add_unredirected_header(name, value)
     try:
         with opener(req, timeout=settings.judge_timeout) as r:
             d = json.loads(r.read().decode())
@@ -180,8 +187,11 @@ def call_judge(prompt: str, settings, opener=urllib.request.urlopen) -> tuple[st
             if d.get("status") != "completed":
                 raise JudgeError("Responses não completou a resposta")
             text = "".join(
-                c["text"] for msg in d.get("output", []) if msg.get("type") == "message"
-                for c in msg.get("content", []) if c.get("type") == "output_text"
+                c["text"]
+                for msg in d.get("output", [])
+                if msg.get("type") == "message"
+                for c in msg.get("content", [])
+                if c.get("type") == "output_text"
             )
         elif settings.judge_api == "anthropic":
             if d.get("stop_reason") != "end_turn":
@@ -195,8 +205,10 @@ def call_judge(prompt: str, settings, opener=urllib.request.urlopen) -> tuple[st
         if not isinstance(text, str) or not text.strip():
             raise JudgeError("juiz devolveu conteúdo vazio")
         if settings.judge_api != "chat":
-            usage = {"prompt_tokens": usage.get("input_tokens", 0),
-                     "completion_tokens": usage.get("output_tokens", 0)}
+            usage = {
+                "prompt_tokens": usage.get("input_tokens", 0),
+                "completion_tokens": usage.get("output_tokens", 0),
+            }
         return text, usage
     except (KeyError, IndexError, TypeError, AttributeError) as exc:
         raise JudgeError("formato de resposta do juiz inválido") from exc

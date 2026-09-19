@@ -11,7 +11,10 @@ network offers an accessible feed.
 
 `compose.yaml` is an isolated acceptance stack, **not a production deployment**.
 Only the reader binds a host port, and only on `127.0.0.1`. The critic has none.
-Never use production reader credentials in mutation tests.
+Never use production reader credentials in mutation tests. HTTP is only for
+loopback or a trusted private container network; use HTTPS for every remote
+provider/source/webhook. Never put credentials into a URL. Authentication
+headers are sent only to the original URL, not forwarded on HTTP redirects.
 
 ## Run locally
 

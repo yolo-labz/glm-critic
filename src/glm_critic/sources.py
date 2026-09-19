@@ -55,8 +55,6 @@ class HttpSource:
             "Content-Type": "application/json",
             "User-Agent": self.user_agent,
         }
-        if self.api_key and form is None:
-            headers[key_header] = self.api_key
         data = json.dumps(body).encode() if body is not None else None
         if form is not None:
             headers["Content-Type"] = "application/x-www-form-urlencoded"
@@ -67,6 +65,8 @@ class HttpSource:
             data=data,
             headers=headers,
         )
+        if self.api_key and form is None:
+            req.add_unredirected_header(key_header, self.api_key)
         try:
             with self._open(req, timeout=self.timeout) as r:
                 raw = r.read().decode() or "{}"
@@ -106,7 +106,7 @@ class MinifluxSource:
         """
         path = f"/v1/entries/{entry_id}"
         code, entry = self.http.request(path)
-        if code != 200 or not isinstance(entry.get("starred"), bool):
+        if code != 200 or not isinstance(entry, dict) or not isinstance(entry.get("starred"), bool):
             raise SourceError("Miniflux não informou o estado da estrela")
         if entry["starred"] == on:
             return True
@@ -114,7 +114,7 @@ class MinifluxSource:
         if status_code not in (200, 204):
             return False
         code, entry = self.http.request(path)
-        return code == 200 and entry.get("starred") == on
+        return code == 200 and isinstance(entry, dict) and entry.get("starred") == on
 
     def mark_category_read(self, category_id: int) -> bool:
         status_code, _ = self.http.request(
@@ -141,7 +141,8 @@ class FreshRSSSource:
 
     def _request(self, **params) -> dict:
         code, data = self.http.request(
-            "/api/fever.php?api", method="POST",
+            "/api/fever.php?api",
+            method="POST",
             form={"api_key": self.http.api_key, **params},
         )
         if code != 200 or not isinstance(data, dict) or data.get("auth") != 1:
@@ -163,20 +164,25 @@ class FreshRSSSource:
             items = []
             selected = ids[:limit]
             for offset in range(0, len(selected), 50):
-                batch = selected[offset:offset + 50]
+                batch = selected[offset : offset + 50]
                 page = self._request(items="", with_ids=",".join(map(str, batch)))
                 for e in page["items"]:
                     if int(e["id"]) not in batch or e.get("is_read"):
                         continue  # The user may have read it since the ID snapshot.
-                    items.append({
-                        "id": int(e["id"]), "title": e.get("title", "").strip(),
-                        "url": e.get("url", ""), "content": e.get("html", ""),
-                        "published_at": datetime.fromtimestamp(
-                            int(e["created_on_time"]), UTC
-                        ).isoformat(),
-                        "feed": feeds.get(int(e["feed_id"]), ""),
-                        "hash": f"freshrss:{e['id']}", "starred": bool(e.get("is_saved")),
-                    })
+                    items.append(
+                        {
+                            "id": int(e["id"]),
+                            "title": e.get("title", "").strip(),
+                            "url": e.get("url", ""),
+                            "content": e.get("html", ""),
+                            "published_at": datetime.fromtimestamp(
+                                int(e["created_on_time"]), UTC
+                            ).isoformat(),
+                            "feed": feeds.get(int(e["feed_id"]), ""),
+                            "hash": f"freshrss:{e['id']}",
+                            "starred": bool(e.get("is_saved")),
+                        }
+                    )
             return sorted(items, key=lambda e: e["published_at"], reverse=True), len(ids)
         except (KeyError, TypeError, ValueError, OverflowError, AttributeError) as exc:
             raise SourceError("resposta Fever inválida") from exc

@@ -97,16 +97,24 @@ class Handler(BaseHTTPRequestHandler):
 
         limit = opts.get("limit", 120)
         status = opts.get("status", "unread")
-        if (type(limit) is not int or not 1 <= limit <= 1000
-                or status not in ("unread", "read", "removed")
-                or any(type(opts[k]) is not bool for k in ("star", "dry_run") if k in opts)):
+        if (
+            type(limit) is not int
+            or not 1 <= limit <= 1000
+            or status not in ("unread", "read", "removed")
+            or (self.settings.source_type == "freshrss" and status != "unread")
+            or any(type(opts[k]) is not bool for k in ("star", "dry_run") if k in opts)
+        ):
             self._json(400, {"ok": False, "error": "opções inválidas"})
             return
         try:
             with RUN_LOCK:
                 payload = run_once(
-                    self.settings, self.rubric, star=opts.get("star", False),
-                    dry_run=opts.get("dry_run", False), status=status, limit=limit,
+                    self.settings,
+                    self.rubric,
+                    star=opts.get("star", False),
+                    dry_run=opts.get("dry_run", False),
+                    status=status,
+                    limit=limit,
                 )
         except SourceError as exc:
             self._json(502, {"ok": False, "error": str(exc)})
@@ -164,9 +172,9 @@ def notify(url: str, payload: dict, timeout: int = 30, token: str = "") -> bool:
         url,
         method="POST",
         data=json.dumps(payload, ensure_ascii=False).encode(),
-        headers={"Content-Type": "application/json", "User-Agent": "glm-critic",
-                 "X-Critic-Token": token},
+        headers={"Content-Type": "application/json", "User-Agent": "glm-critic"},
     )
+    req.add_unredirected_header("X-Critic-Token", token)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return 200 <= r.status < 300
@@ -183,19 +191,25 @@ def notify_pending(settings: Settings, payload: dict) -> bool:
     """
     if not settings.notify_url or not settings.notify_token:
         return False
+    # ponytail: O(n) acknowledged-key set, one replica. Compact or move to
+    # SQLite before a large multi-user backlog; never discard keys blindly.
     path = Path(settings.log_path + ".notified")
     sent = set(path.read_text().splitlines()) if path.exists() else set()
     items = [i for i in payload["items"] if i["notification_key"] not in sent]
     if not items:
         return False
-    if not notify(settings.notify_url, {**payload, "items": items, "signals": len(items)},
-                  token=settings.notify_token):
+    if not notify(
+        settings.notify_url,
+        {**payload, "items": items, "signals": len(items)},
+        token=settings.notify_token,
+    ):
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as fh:
         fh.writelines(i["notification_key"] + "\n" for i in items)
         fh.flush()
         import os
+
         os.fsync(fh.fileno())
     return True
 
@@ -223,8 +237,9 @@ def make_server(settings: Settings, host: str, port: int, rubric: Rubric | None 
     return ThreadingHTTPServer((host, port), handler)
 
 
-def serve(settings: Settings, host: str = "0.0.0.0", port: int = 8080,
-          rubric: Rubric | None = None) -> None:
+def serve(
+    settings: Settings, host: str = "0.0.0.0", port: int = 8080, rubric: Rubric | None = None
+) -> None:
     rubric = rubric or rubric_for(settings)
     httpd = make_server(settings, host, port, rubric)
     logging.info("glm-critic ouvindo em %s:%s · modelo %s", host, port, settings.judge_model)

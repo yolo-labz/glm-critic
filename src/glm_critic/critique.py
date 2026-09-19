@@ -82,9 +82,18 @@ def critique(
     unique, collapsed = collapse(items)
     res.collapsed = collapsed
 
-    rhash = rubric_hash("\n".join((rubric.render(), settings.judge_api,
-                                  settings.judge_url, settings.judge_model,
-                                  settings.source_type, settings.source_url)))
+    rhash = rubric_hash(
+        "\n".join(
+            (
+                rubric.render(),
+                settings.judge_api,
+                settings.judge_url,
+                settings.judge_model,
+                settings.source_type,
+                settings.source_url,
+            )
+        )
+    )
     cached = log.load()
     verdicts: list[Verdict] = []
     fresh: list[Verdict] = []  # só o que foi julgado nesta execução
