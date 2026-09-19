@@ -149,30 +149,54 @@ def _as_score(value) -> int:
 
 def call_judge(prompt: str, settings, opener=urllib.request.urlopen) -> tuple[str, dict]:
     """Uma chamada ao modelo. `opener` é injetável para teste sem rede."""
-    payload = {
-        "model": settings.judge_model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
-        "max_tokens": settings.max_tokens,
-    }
+    headers = {"Content-Type": "application/json"}
+    payload = {"model": settings.judge_model}
+    if settings.judge_api == "responses":
+        payload.update(input=prompt, max_output_tokens=settings.max_tokens)
+        headers["Authorization"] = f"Bearer {settings.judge_key}"
+    elif settings.judge_api in {"chat", "anthropic"}:
+        payload.update(messages=[{"role": "user", "content": prompt}],
+                       max_tokens=settings.max_tokens)
+        if settings.judge_api == "anthropic":
+            headers.update({"x-api-key": settings.judge_key, "anthropic-version": "2023-06-01"})
+        else:
+            headers["Authorization"] = f"Bearer {settings.judge_key}"
+    else:
+        raise JudgeError("protocolo de juiz desconhecido")
     req = urllib.request.Request(
-        settings.judge_url,
-        method="POST",
-        data=json.dumps(payload).encode(),
-        headers={
-            "Authorization": f"Bearer {settings.judge_key}",
-            "Content-Type": "application/json",
-        },
+        settings.judge_url, method="POST", data=json.dumps(payload).encode(), headers=headers,
     )
     try:
         with opener(req, timeout=settings.judge_timeout) as r:
             d = json.loads(r.read().decode())
     except urllib.error.HTTPError as exc:
-        raise JudgeError(f"juiz respondeu {exc.code}: {exc.read().decode()[:200]}") from exc
+        raise JudgeError(f"juiz respondeu HTTP {exc.code}") from exc
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise JudgeError("juiz inalcançável ou JSON inválido") from exc
 
-    choices = d.get("choices") or []
-    if not choices:
-        raise JudgeError(f"resposta sem choices: {json.dumps(d)[:200]}")
-    message = choices[0].get("message") or {}
-    usage = d.get("usage") or {}
-    return message.get("content") or "", usage
+    try:
+        usage = d.get("usage") or {}
+        if settings.judge_api == "responses":
+            if d.get("status") != "completed":
+                raise JudgeError("Responses não completou a resposta")
+            text = "".join(
+                c["text"] for msg in d.get("output", []) if msg.get("type") == "message"
+                for c in msg.get("content", []) if c.get("type") == "output_text"
+            )
+        elif settings.judge_api == "anthropic":
+            if d.get("stop_reason") != "end_turn":
+                raise JudgeError("Messages não completou a resposta")
+            text = "".join(c["text"] for c in d.get("content", []) if c.get("type") == "text")
+        else:
+            choice = d["choices"][0]
+            if choice.get("finish_reason", "stop") != "stop":
+                raise JudgeError("Chat não completou a resposta")
+            text = choice["message"]["content"]
+        if not isinstance(text, str) or not text.strip():
+            raise JudgeError("juiz devolveu conteúdo vazio")
+        if settings.judge_api != "chat":
+            usage = {"prompt_tokens": usage.get("input_tokens", 0),
+                     "completion_tokens": usage.get("output_tokens", 0)}
+        return text, usage
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
+        raise JudgeError("formato de resposta do juiz inválido") from exc

@@ -1,0 +1,38 @@
+# Isolated acceptance stack; does not touch Dokku, nginx or Cloudflare.
+services:
+  reader:
+    image: freshrss/freshrss:1.30.0@sha256:258b8edfc8a76a61f60d2d6a14d8f8d12495d78abf38646a2137612dfa264a21
+    ports:
+      - "127.0.0.1:${RSS_PORT:-8787}:80"
+    environment:
+      TZ: America/Recife
+      CRON_MIN: "7,37"
+      FRESHRSS_INSTALL: >-
+        --default-user reader --auth-type form --api-enabled
+        --db-type sqlite --base-url http://localhost:${RSS_PORT:-8787}
+        --language pt-br
+      FRESHRSS_USER: >-
+        --user reader --password ${RSS_PASSWORD:?set a random alphanumeric password}
+        --api-password ${RSS_API_PASSWORD:?set a separate random alphanumeric API password}
+        --no-default-feeds --language pt-br
+    volumes:
+      - reader-data:/var/www/FreshRSS/data
+  critic:
+    profiles: [critic]
+    build: ..
+    # No published port. Only the reader UI is bound to host loopback.
+    environment:
+      SOURCE_TYPE: freshrss
+      SOURCE_URL: http://reader
+      SOURCE_API_KEY: ${RSS_FEVER_KEY:-}
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-}
+      JUDGE_API: ${JUDGE_API:-chat}
+      JUDGE_URL: ${JUDGE_URL:-https://api.z.ai/api/coding/paas/v4/chat/completions}
+      JUDGE_MODEL: ${JUDGE_MODEL:-glm-5.3}
+      JUDGE_API_KEY: ${JUDGE_API_KEY:-}
+      CRITIC_EVERY_SECONDS: "0"
+    volumes:
+      - critic-data:/data
+volumes:
+  reader-data:
+  critic-data:

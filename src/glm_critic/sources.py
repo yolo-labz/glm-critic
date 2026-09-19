@@ -12,6 +12,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import UTC, datetime
 
 
 class SourceError(RuntimeError):
@@ -47,18 +48,23 @@ class HttpSource:
         method: str = "GET",
         body: dict | None = None,
         key_header: str = "X-Auth-Token",
+        form: dict | None = None,
     ) -> tuple[int, dict]:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
             "User-Agent": self.user_agent,
         }
-        if self.api_key:
+        if self.api_key and form is None:
             headers[key_header] = self.api_key
+        data = json.dumps(body).encode() if body is not None else None
+        if form is not None:
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            data = urllib.parse.urlencode(form).encode()
         req = urllib.request.Request(
             f"{self.base_url}{path}",
             method=method,
-            data=json.dumps(body).encode() if body is not None else None,
+            data=data,
             headers=headers,
         )
         try:
@@ -67,8 +73,8 @@ class HttpSource:
                 return r.status, (json.loads(raw) if raw.strip().startswith(("{", "[")) else {})
         except urllib.error.HTTPError as exc:
             return exc.code, {"error": exc.read().decode()[:200]}
-        except urllib.error.URLError as exc:
-            raise SourceError(f"fonte inalcançável: {exc.reason}") from exc
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise SourceError("fonte inalcançável ou resposta inválida") from exc
 
 
 class MinifluxSource:
@@ -93,13 +99,22 @@ class MinifluxSource:
         return [normalize_entry(e) for e in (d.get("entries") or [])], int(d.get("total") or 0)
 
     def star(self, entry_id: int, on: bool = True) -> bool:
-        """Marca/desmarca. Desmarcar NÃO é `/unbookmark` (404) nem `DELETE`
-        (405): é o mesmo `PUT /bookmark` com `{"bookmark": false}` — detalhe que
-        não está na documentação e custou uma rodada de tentativa."""
-        status_code, _ = self.http.request(
-            f"/v1/entries/{entry_id}/bookmark", method="PUT", body={"bookmark": bool(on)}
-        )
-        return status_code in (200, 204)
+        """Miniflux PUT /bookmark toggles; its handler ignores the request body.
+
+        Read first and verify after toggling. One critic writer is required;
+        Miniflux exposes no compare-and-swap against a concurrent UI change.
+        """
+        path = f"/v1/entries/{entry_id}"
+        code, entry = self.http.request(path)
+        if code != 200 or not isinstance(entry.get("starred"), bool):
+            raise SourceError("Miniflux não informou o estado da estrela")
+        if entry["starred"] == on:
+            return True
+        status_code, _ = self.http.request(path + "/bookmark", method="PUT")
+        if status_code not in (200, 204):
+            return False
+        code, entry = self.http.request(path)
+        return code == 200 and entry.get("starred") == on
 
     def mark_category_read(self, category_id: int) -> bool:
         status_code, _ = self.http.request(
@@ -112,6 +127,75 @@ class MinifluxSource:
         if status_code != 200:
             raise SourceError(f"miniflux {status_code}: {d}")
         return d if isinstance(d, list) else []
+
+
+class FreshRSSSource:
+    """Native Fever API; SOURCE_API_KEY is md5(username:API-password).
+
+    ponytail: unread-only is the intake contract, not a complete Fever client.
+    Read/archive migration belongs to FreshRSS exports, not the critic.
+    """
+
+    def __init__(self, http: HttpSource):
+        self.http = http
+
+    def _request(self, **params) -> dict:
+        code, data = self.http.request(
+            "/api/fever.php?api", method="POST",
+            form={"api_key": self.http.api_key, **params},
+        )
+        if code != 200 or not isinstance(data, dict) or data.get("auth") != 1:
+            raise SourceError(f"FreshRSS Fever recusou a chamada (HTTP {code})")
+        return data
+
+    def feeds(self) -> list[dict]:
+        return self._request(feeds="").get("feeds", [])
+
+    def entries(self, status: str = "unread", limit: int = 120) -> tuple[list[dict], int]:
+        if status != "unread":
+            raise SourceError("FreshRSS intake suporta somente status=unread")
+        if not 1 <= limit <= 1000:
+            raise SourceError("limit deve estar entre 1 e 1000")
+        data = self._request(unread_item_ids="", feeds="")
+        try:
+            ids = sorted({int(i) for i in data["unread_item_ids"].split(",") if i}, reverse=True)
+            feeds = {int(f["id"]): f["title"] for f in data["feeds"]}
+            items = []
+            selected = ids[:limit]
+            for offset in range(0, len(selected), 50):
+                batch = selected[offset:offset + 50]
+                page = self._request(items="", with_ids=",".join(map(str, batch)))
+                for e in page["items"]:
+                    if int(e["id"]) not in batch or e.get("is_read"):
+                        continue  # The user may have read it since the ID snapshot.
+                    items.append({
+                        "id": int(e["id"]), "title": e.get("title", "").strip(),
+                        "url": e.get("url", ""), "content": e.get("html", ""),
+                        "published_at": datetime.fromtimestamp(
+                            int(e["created_on_time"]), UTC
+                        ).isoformat(),
+                        "feed": feeds.get(int(e["feed_id"]), ""),
+                        "hash": f"freshrss:{e['id']}", "starred": bool(e.get("is_saved")),
+                    })
+            return sorted(items, key=lambda e: e["published_at"], reverse=True), len(ids)
+        except (KeyError, TypeError, ValueError, OverflowError, AttributeError) as exc:
+            raise SourceError("resposta Fever inválida") from exc
+
+    def star(self, entry_id: int, on: bool = True) -> bool:
+        data = self._request(mark="item", **{"as": "saved" if on else "unsaved"}, id=entry_id)
+        saved = {i for i in data.get("saved_item_ids", "").split(",") if i}
+        return (str(entry_id) in saved) == on
+
+
+def source_for(settings):
+    http = HttpSource(
+        settings.source_url, settings.source_key, settings.user_agent, settings.source_timeout
+    )
+    if settings.source_type == "freshrss":
+        return FreshRSSSource(http)
+    if settings.source_type == "miniflux":
+        return MinifluxSource(http)
+    raise SourceError("tipo de fonte desconhecido")
 
 
 def normalize_entry(e: dict) -> dict:

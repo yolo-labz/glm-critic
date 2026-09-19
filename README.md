@@ -4,7 +4,7 @@ Um juiz de rubrica para fluxos de conteúdo. Recebe itens de uma fonte (hoje um
 leitor RSS self-hosted), pontua cada um contra um critério de valor **explícito
 e versionado** usando um modelo de linguagem, e devolve só o que passa do corte.
 
-Sem dependências de runtime: stdlib puro, 33 testes que rodam sem rede.
+Sem dependências de runtime: stdlib puro. Testes unitários rodam sem rede.
 
 ```bash
 glm-critic run --limit 40 --dry-run     # julga e mostra, sem gravar nada
@@ -90,10 +90,14 @@ falha alto.
 | Variável | Obrigatória | Para quê |
 |---|---|---|
 | `JUDGE_API_KEY` | sim para `run`/`serve` | chave do modelo juiz |
-| `JUDGE_URL` | não | endpoint compatível com OpenAI |
-| `JUDGE_MODEL` | não | padrão `glm-5.3` |
+| `JUDGE_URL` | não | URL completa do endpoint; padrão Z.AI Coding Plan |
+| `JUDGE_API` | não | `chat` (padrão), `responses`, `anthropic` |
+| `JUDGE_MODEL` | não | modelo exato do endpoint; padrão `glm-5.3` |
+| `SOURCE_TYPE` | não | `miniflux` (padrão) ou `freshrss` (Fever, unread-only) |
 | `SOURCE_URL` / `SOURCE_API_KEY` | sim para `run` | a fonte de conteúdo |
 | `SERVICE_TOKEN` | sim para `serve` | **sem ele o serviço não sobe** |
+| `CRITIC_EVERY_SECONDS` | não | ciclo autônomo, desligado por padrão (`0`) |
+| `NOTIFY_URL` / `NOTIFY_TOKEN` | juntos | webhook interno, autenticação `X-Critic-Token` |
 | `CRITIC_MIN_SCORE` | não | corte para virar sinal (padrão 6) |
 | `CRITIC_LOG` | não | log de vereditos (padrão `verdicts.jsonl`) |
 | `CRITIC_PROJECTS` | não | projetos vivos, separados por vírgula |
@@ -111,12 +115,46 @@ nenhuma.
 
 ## Integração com n8n
 
-O n8n orquestra agendamento, retry, entrega e notificação; o critic decide. Os
-dois são apps no mesmo host, então o n8n chama `http://glm-critic.web:8080` pela
-rede interna do Dokku — sem DNS público, sem túnel, sem TLS para administrar.
+O critic agenda e chama o webhook **autenticado** do n8n pela rede interna.
+Não publique o critic no nginx, Cloudflare ou em portas do host. O leitor é a
+única interface de leitura. `CRITIC_EVERY_SECONDS=0` mantém o ciclo desligado.
 
-O fluxo vive em [`yolo-labz/n8n-flows`](https://github.com/yolo-labz/n8n-flows)
-como workflow-as-code, seguindo a convenção daquele repo.
+O fluxo vive em [`yolo-labz/n8n-flows`](https://github.com/yolo-labz/n8n-flows).
+O node Webhook precisa de `webhookId` para registrar `/webhook/glm-critic`;
+sem esse campo, n8n prefixa o caminho com ID do workflow e nome do node.
+`NOTIFY_TOKEN` corresponde à credencial Header Auth `X-Critic-Token` do n8n.
+
+As confirmações ficam em `<CRITIC_LOG>.notified` no mesmo volume. Sinais em cache
+não são reenviados após confirmação HTTP. Um timeout depois do envio pode ainda
+duplicar e-mail: não há promessa de exactly-once. Sem confirmação, tenta de novo.
+Não execute réplicas concorrentes ou CLI junto do scheduler no mesmo log.
+
+## FreshRSS e provedores
+
+O critic completo continua em uso — substituir pelo prompt de uma extensão que
+retorna só tags perderia dedup, explicações e trilha. FreshRSS usa a API Fever:
+`SOURCE_URL` é a raiz do leitor, `SOURCE_API_KEY` é MD5 de `usuário:senha-da-API`
+(não a senha de login). API deve estar habilitada. Use log separado por leitor.
+O adaptador pagina em blocos de 50; estrela com `saved`, não toggle.
+
+| Protocolo | Uso | Verificação |
+|---|---|---|
+| `chat` | Z.AI, endpoints OpenAI-compatible, Ollama/LocalAI compatíveis | contrato local + GLM-5.3 real |
+| `responses` | OpenAI `/v1/responses` | contrato local; não comprova acesso/assinatura |
+| `anthropic` | Anthropic `/v1/messages` | contrato local; pagamento pausado, não chamado |
+
+Selecione endpoint, protocolo, modelo frontier e chave **explicitamente**. Não há
+fallback automático nem conversão de assinatura ChatGPT/Claude em crédito de API.
+Compatibilidade de protocolo não garante os recursos/opções de todo modelo.
+Somente feeds públicos podem ir à Z.AI; conteúdo privado exige provedor elegível.
+
+O cache é isolado por rubrica, modelo, protocolo, endpoint e leitor. `dry_run`
+funciona tanto no HTTP como na CLI: chama o juiz, mas não grava nem estrela.
+Falhas parciais saem como erro, não `ok:true`. O uso contabilizado inclui a
+primeira resposta em prosa que precisou de retry.
+
+Instalação isolada, migração e gate de produção: [deploy/README.md](deploy/README.md).
+Evidência medida: [specs/001-freshrss/evidence.md](specs/001-freshrss/evidence.md).
 
 ## O que **não** está medido
 
@@ -135,7 +173,7 @@ como workflow-as-code, seguindo a convenção daquele repo.
 pip install -e . && python -m unittest discover -s tests -v
 ```
 
-33 casos, sem rede: colapso de duplicata e sua fronteira, alinhamento de
+Casos sem rede: colapso de duplicata e sua fronteira, alinhamento de
 veredito (incluindo ambíguo e índice inválido), escopo do cache pela rubrica,
 downgrade de lote perdido, e o serviço recusando subir sem token.
 

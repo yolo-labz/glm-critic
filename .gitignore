@@ -6,6 +6,7 @@ dist/
 .venv/
 venv/
 verdicts.jsonl
+*.notified
 *.jsonl
 .env
 .env.*

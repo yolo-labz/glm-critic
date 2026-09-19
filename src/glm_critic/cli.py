@@ -9,7 +9,7 @@ import logging
 from .config import ConfigError, Settings
 from .critique import critique
 from .rubric import Rubric, rubric_for
-from .sources import HttpSource, MinifluxSource, SourceError
+from .sources import SourceError, source_for
 from .store import VerdictLog
 
 
@@ -48,8 +48,7 @@ def cmd_run(args) -> int:
         return 2
 
     rubric = Rubric.from_file(args.rubric) if args.rubric else rubric_for(s)
-    http = HttpSource(s.source_url, s.source_key, s.user_agent, s.source_timeout)
-    source = MinifluxSource(http)
+    source = source_for(s)
 
     try:
         items, total = source.entries(status=args.status, limit=args.limit)
@@ -74,19 +73,22 @@ def cmd_run(args) -> int:
             logging.warning("lote perdido: %s", f)
     logging.info("tokens: %s entrada / %s saída", res.prompt_tokens, res.completion_tokens)
 
+    if args.star and not args.dry_run:
+        n = sum(1 for v in res.signals if v.item_id is not None and source.star(int(v.item_id)))
+        logging.info("estrelados: %s", n)
+        if n != len(res.signals):
+            res.failures.append("nem todos os sinais foram estrelados")
+
     if args.json:
         print(json.dumps(res.as_dict(), ensure_ascii=False, indent=2))
-        return 0
+        return 3 if res.failures else 0
 
     for v in res.signals[: args.top]:
         print(f"- [{v.score}] {v.title}  ({v.artifact})")
         print(f"      {v.why}")
         print(f"      {v.url}")
 
-    if args.star and not args.dry_run:
-        n = sum(1 for v in res.signals if v.item_id is not None and source.star(int(v.item_id)))
-        logging.info("estrelados: %s", n)
-    return 0
+    return 3 if res.failures else 0
 
 
 def cmd_stats(args) -> int:
@@ -110,6 +112,9 @@ def cmd_serve(args) -> int:
 
     s = _build(args)
     s.require_service_token()
+    s.require_judge()
+    if not s.source_url or not s.source_key:
+        raise ConfigError("serve exige SOURCE_URL e SOURCE_API_KEY")
     serve(s, host=args.host, port=args.port)
     return 0
 

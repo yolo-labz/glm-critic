@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "considered": 3,
+  "judged": 3,
+  "signals": 2,
+  "failures": [],
+  "tokens": {
+    "prompt": 1093,
+    "completion": 2972
+  },
+  "model": "glm-5.3",
+  "dry_run_log_absent": true
+}
