@@ -29,17 +29,20 @@ class ConfigError(RuntimeError):
 class Settings:
     judge_url: str = DEFAULT_JUDGE_URL
     judge_model: str = "glm-5.3"
+    judge_api: str = "chat"
     judge_key: str = ""
     judge_timeout: int = 300
     batch_size: int = DEFAULT_BATCH
     max_tokens: int = DEFAULT_MAX_TOKENS
     min_score: int = 6
     user_agent: str = "glm-critic/0.1 (+https://github.com/yolo-labz/glm-critic)"
+    source_type: str = "miniflux"
     source_url: str = ""
     source_key: str = ""
     source_timeout: int = 45
     service_token: str = ""
     notify_url: str = ""
+    notify_token: str = ""
     every_seconds: int = 0
     log_path: str = "verdicts.jsonl"
     extra: dict = field(default_factory=dict)
@@ -60,20 +63,32 @@ class Settings:
         s = cls(
             judge_url=e.get("JUDGE_URL") or DEFAULT_JUDGE_URL,
             judge_model=e.get("JUDGE_MODEL") or "glm-5.3",
+            judge_api=e.get("JUDGE_API") or "chat",
             judge_key=e.get("JUDGE_API_KEY", ""),
             judge_timeout=_int("JUDGE_TIMEOUT", 300),
             batch_size=_int("CRITIC_BATCH", DEFAULT_BATCH),
             max_tokens=_int("CRITIC_MAX_TOKENS", DEFAULT_MAX_TOKENS),
             min_score=_int("CRITIC_MIN_SCORE", 6),
             user_agent=e.get("CRITIC_USER_AGENT") or cls.user_agent,
+            source_type=e.get("SOURCE_TYPE") or "miniflux",
             source_url=e.get("SOURCE_URL", ""),
             source_key=e.get("SOURCE_API_KEY", ""),
             source_timeout=_int("SOURCE_TIMEOUT", 45),
             service_token=e.get("SERVICE_TOKEN", ""),
             notify_url=e.get("NOTIFY_URL", ""),
+            notify_token=e.get("NOTIFY_TOKEN", ""),
             every_seconds=_int("CRITIC_EVERY_SECONDS", 0),
             log_path=e.get("CRITIC_LOG", "verdicts.jsonl"),
+            extra={"projects": e.get("CRITIC_PROJECTS", "")},
         )
+        if s.judge_api not in {"chat", "responses", "anthropic"}:
+            raise ConfigError("JUDGE_API deve ser chat, responses ou anthropic")
+        if s.source_type not in {"miniflux", "freshrss"}:
+            raise ConfigError("SOURCE_TYPE deve ser miniflux ou freshrss")
+        if s.every_seconds < 0 or s.batch_size < 1 or s.max_tokens < 1:
+            raise ConfigError("intervalo deve ser >= 0; lote e tokens devem ser > 0")
+        if s.notify_url and not s.notify_token:
+            raise ConfigError("NOTIFY_URL exige NOTIFY_TOKEN")
         return s
 
     def require_judge(self) -> None:

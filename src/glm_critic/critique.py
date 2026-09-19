@@ -48,6 +48,7 @@ class CritiqueResult:
             "items": [
                 {
                     "id": v.item_id,
+                    "notification_key": f"{v.key}:{v.rubric_hash}",
                     "score": v.score,
                     "artifact": v.artifact,
                     "why": v.why,
@@ -81,7 +82,18 @@ def critique(
     unique, collapsed = collapse(items)
     res.collapsed = collapsed
 
-    rhash = rubric_hash(rubric.render())
+    rhash = rubric_hash(
+        "\n".join(
+            (
+                rubric.render(),
+                settings.judge_api,
+                settings.judge_url,
+                settings.judge_model,
+                settings.source_type,
+                settings.source_url,
+            )
+        )
+    )
     cached = log.load()
     verdicts: list[Verdict] = []
     fresh: list[Verdict] = []  # só o que foi julgado nesta execução
@@ -103,6 +115,8 @@ def critique(
         prompt = build_prompt(chunk, rubric)
         try:
             text, usage = judge_call(prompt, settings)
+            res.prompt_tokens += int(usage.get("prompt_tokens") or 0)
+            res.completion_tokens += int(usage.get("completion_tokens") or 0)
             parsed = verdicts_from_response(text, len(chunk))
         except JudgeError as first_exc:
             # Medido: de vez em quando o juiz responde em prosa em vez do array.
@@ -111,6 +125,8 @@ def critique(
             # e descartado.
             try:
                 text, usage = judge_call(prompt + STRICT_SUFFIX, settings)
+                res.prompt_tokens += int(usage.get("prompt_tokens") or 0)
+                res.completion_tokens += int(usage.get("completion_tokens") or 0)
                 parsed = verdicts_from_response(text, len(chunk))
                 res.retried += 1
             except JudgeError as exc:
@@ -120,9 +136,6 @@ def critique(
                     f"lote {i // settings.batch_size + 1}: {exc} (primeira tentativa: {first_exc})"
                 )
                 continue
-
-        res.prompt_tokens += int(usage.get("prompt_tokens") or 0)
-        res.completion_tokens += int(usage.get("completion_tokens") or 0)
 
         for p in parsed:
             it = chunk[p["i"]]

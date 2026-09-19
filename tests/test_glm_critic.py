@@ -300,17 +300,26 @@ class TestSources(unittest.TestCase):
         self.assertEqual(got["feed"], "")
         self.assertEqual(got["title"], "")
 
-    def test_unbookmark_uses_the_bookmark_route_with_false(self):
+    def test_unbookmark_reads_toggles_and_verifies(self):
+        # Upstream 2.3.3 toggleStarredHandler ignores the body. The previous
+        # test only asserted an invented request, not the server's state.
         calls = []
 
         class FakeHttp(HttpSource):
+            starred = True
+
             def request(self, path, method="GET", body=None, key_header="X-Auth-Token"):
                 calls.append((path, method, body))
-                return 204, {}
+                if method == "PUT":
+                    self.starred = not self.starred
+                    return 204, {}
+                return 200, {"starred": self.starred}
 
-        MinifluxSource(FakeHttp("http://x")).star(7, on=False)
-        self.assertEqual(calls[0][0], "/v1/entries/7/bookmark")
-        self.assertEqual(calls[0][2], {"bookmark": False})
+        source = MinifluxSource(FakeHttp("http://x"))
+        self.assertTrue(source.star(7, on=False))
+        self.assertTrue(source.star(7, on=False))
+        self.assertEqual([c[1] for c in calls], ["GET", "PUT", "GET", "GET"])
+        self.assertEqual(calls[1], ("/v1/entries/7/bookmark", "PUT", None))
 
 
 class TestService(unittest.TestCase):
@@ -461,10 +470,10 @@ class TestNotifyDirection(unittest.TestCase):
         self.assertEqual(seen["body"]["signals"], 2)
 
     def test_notify_failure_is_reported_not_raised(self):
-        from glm_critic.service import notify
-
-        import urllib.error
         import unittest.mock as mock
+        import urllib.error
+
+        from glm_critic.service import notify
 
         with mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError("boom")):
             self.assertFalse(notify("http://x.invalid/", {"signals": 1}))
