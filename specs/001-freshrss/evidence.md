@@ -34,7 +34,7 @@
   health **200**, unauthenticated run **401**, authenticated limit=0 **400**.
   `docker inspect`: host port bindings `{}`. Dummy judge key was used for these
   transport-only checks; no paid call from the container.
-- `ruff check .`: pass. `python -m unittest discover -s tests -q`: **55 passed**.
+- `ruff check .`: pass. `python -m unittest discover -s tests -q`: **57 passed** (after review hardening).
 - n8n counterpart: **26 tests passed**, including JS renderer injection tests
   and static webhook authentication/path contract; no SMTP invocation.
 
@@ -60,6 +60,22 @@ Source: https://github.com/miniflux/v2/blob/2.3.3/internal/api/entry_handlers.go
 - Search tool had one failed response; SearXNG fallback returned results through
   Yep while several other engines were blocked. Canonical upstream sources were
   fetched for the actual API and deployment contracts.
+
+## Independent review and CI
+
+Generator: OpenAI. Different-family reviewer: full Z.AI GLM-5.3. Initial bounded
+review of the inlined implementation at `6b228ee` and n8n `c78bb48`: **PASS**,
+with explicit no-tool/partial-file coverage. Minor findings were addressed:
+unsupported FreshRSS status returns 400, malformed Miniflux star state fails
+closed, credential headers are not forwarded on redirects, receipt growth and
+HTTPS requirements are documented. Final-head follow-up is recorded on PR #1,
+not inferred from this earlier review.
+
+GitHub run `35462090544`: all four required jobs passed at `2e3ed2f` — Python
+3.11/3.12/3.13 and Docker. Public critic main now enforces these checks, strict
+up-to-date, no force/deletion, linear history and resolved conversations.
+Private n8n/reels repositories cannot enable rulesets on the current plan
+(API403); those PRs are outside the protected-base self-merge class.
 
 ## Not proved / not deployed
 
